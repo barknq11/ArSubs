@@ -28,10 +28,14 @@ Get the latest version from the [Releases](../../releases) page:
 
 If the subtitle it picked is out of sync, double-click another match in the list to replace it.
 
+If it can't find anything, or detected the wrong show, fix the title, season or episode in the **Search as** row and press **Search**.
+
 ## Features
 
 - Detects the title, season, episode and year from file names, including `S01E05`, `1x05`, anime names like `[Group] Title - 05`, and `Episode 1100`.
-- Matches by exact file hash on OpenSubtitles when possible, and ranks the rest by how close the release name is.
+- Identifies a video by its file fingerprint (OpenSubtitles hash), so even files named `video_final.mkv` work if someone has uploaded a subtitle for that exact file.
+- Handles both anime numbering styles: an absolute episode number like `Jujutsu Kaisen - 47` is also searched as S02E23, and S02E23 is also searched as episode 47. Episode lists come from [TVmaze](https://www.tvmaze.com), which needs no key.
+- Ranks results by how close the release name is to your file, so the timing is most likely to match.
 - Pulls the right episode out of season-pack zips.
 - Converts old Windows-1256 Arabic subtitles to UTF-8, so the text displays correctly.
 - Choosing a folder skips videos that already have an Arabic subtitle.

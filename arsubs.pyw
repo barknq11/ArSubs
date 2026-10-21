@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import unicodedata
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -102,10 +103,12 @@ def parse_name(path):
             folder = os.path.basename(os.path.dirname(os.path.dirname(path)))
         title = parse_name(os.path.join("x", folder + ".mkv"))["title"] if folder else ""
     info["title"] = title
+    info["variants"] = [(info["season"], info["episode"])] if info["episode"] is not None else []
     return info
 
 
 def tokens(text):
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()  # "Shippūden" -> "Shippuden"
     return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if t}
 
 
@@ -114,6 +117,15 @@ def similarity(a, b):
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / len(ta | tb)
+
+
+def describe(info):
+    if not info["title"]:
+        return ""
+    if info["episode"] is not None:
+        num = "S%02dE%02d" % (info["season"], info["episode"]) if info["season"] else "episode %d" % info["episode"]
+        return f"{info['title']}  {num}"
+    return info["title"] + (f" ({info['year']})" if info["year"] else "")
 
 
 def episode_of(name):
@@ -153,8 +165,81 @@ def opensubtitles_hash(path):
     return "%016x" % h
 
 
+# ---------------------------------------------------------------- episode numbering
+# Anime is often numbered absolutely ("One Piece 1100") while subtitle sites list it as
+# season/episode, or the other way round. TVmaze (free, no key) gives the episode order to convert.
+
+_tvmaze_cache = {}
+
+
+def _tvmaze(url):
+    if url not in _tvmaze_cache:
+        try:
+            _tvmaze_cache[url] = http_json("https://api.tvmaze.com" + url, timeout=15)
+        except (OSError, ValueError):  # not found, offline, bad JSON
+            _tvmaze_cache[url] = []
+    return _tvmaze_cache[url]
+
+
+def tvmaze_episodes(title, season=None, episode=None):
+    """Regular episodes of a show in airing order as [(season, number), ...]; [] if unknown.
+
+    Several shows can share a name (One Piece anime vs. live action), so take the
+    best-named one that actually has this episode."""
+    if not title.strip():
+        return []
+    first = None
+    for hit in _tvmaze("/search/shows?" + urllib.parse.urlencode({"q": title}))[:5]:
+        show = hit.get("show") or {}
+        name = show.get("name", "")
+        if not tokens(title) <= tokens(name) and similarity(name, title) < 0.5:  # "Frieren" ⊂ "Frieren: Beyond…"
+            continue
+        eps = [(e["season"], e["number"]) for e in _tvmaze(f"/shows/{show['id']}/episodes")
+               if e.get("season") and e.get("number")]
+        if not eps:
+            continue
+        first = first or eps
+        if episode is None or (season, episode) in eps or (season in (None, 1) and episode <= len(eps)):
+            return eps
+    return first or []
+
+
+def episode_variants(season, episode, eps):
+    """Every way this episode may be numbered: as written, plus absolute <-> season/episode."""
+    if episode is None:
+        return []
+    out = [(season, episode)]
+    if eps:
+        first_season_len = sum(1 for s, _ in eps if s == eps[0][0])
+        if season in (None, 1) and first_season_len < episode <= len(eps):
+            if eps[episode - 1][0] < 100:  # skip year-numbered "seasons" (2024) no subtitle site uses
+                out.append(eps[episode - 1])                        # absolute -> SxxEyy
+        elif season is not None and (season, episode) in eps:
+            out.append((None, eps.index((season, episode)) + 1))    # SxxEyy -> absolute
+    return out
+
+
+def ep_match(info, season, episode):
+    """Does a subtitle numbered (season, episode) fit this video under any numbering?"""
+    return any(e == episode and (s is None or season is None or s == season) for s, e in info["variants"])
+
+
+def ep_status(c, info):
+    """True = right episode, False = wrong episode, None = can't tell (movie, season pack, no data)."""
+    if c["hash"]:
+        return True
+    if info["episode"] is None or c.get("pack"):
+        return None
+    lo, hi = c.get("range") or (None, None)
+    if lo and hi and any(lo <= e <= hi for _, e in info["variants"]):
+        return None
+    if c.get("episode") is None:
+        return None
+    return ep_match(info, c.get("season"), c["episode"])
+
+
 # ---------------------------------------------------------------- providers
-# Each candidate: dict(source, release, score, fetch=callable -> (filename, bytes))
+# Each candidate: dict(source, release, hash, season, episode, fetch=callable -> (filename, bytes))
 
 class SubDL:
     name = "SubDL"
@@ -164,45 +249,44 @@ class SubDL:
         self.key = key
 
     def search(self, info, log):
-        base = {"api_key": self.key, "languages": "AR", "subs_per_page": 30,
-                "film_name": info["title"], "type": info["kind"]}
+        common = {"api_key": self.key, "languages": "AR", "subs_per_page": 30, "type": info["kind"]}
         if info["year"] and info["kind"] == "movie":
-            base["year"] = info["year"]
-        attempts = []
-        if info["kind"] == "tv":
-            q = dict(base, episode_number=info["episode"], season_number=info["season"] or 1)
-            attempts.append(q)
-            attempts.append(dict(base, episode_number=info["episode"]))
-            attempts.append(dict(base, season_number=info["season"] or 1))
-        else:
-            attempts.append(base)
-            attempts.append({k: v for k, v in base.items() if k != "year"})
-        for q in attempts:
-            try:
-                res = http_json(self.API + "?" + urllib.parse.urlencode(q))
-            except urllib.error.HTTPError as e:
-                log(f"SubDL: HTTP {e.code}")
-                return []
-            subs = res.get("subtitles") or []
-            if res.get("status") and subs:
-                return [self._cand(s, info) for s in subs]
-        return []
+            common["year"] = info["year"]
+        bases = []
+        if info.get("imdb"):
+            bases.append(dict(common, imdb_id=info["imdb"]))
+        if info["title"]:
+            bases.append(dict(common, film_name=info["title"]))
+        seen, out = set(), []
+        for base in bases:
+            if info["kind"] == "tv":
+                attempts = []
+                for s, e in info["variants"]:
+                    attempts += [dict(base, season_number=s or 1, episode_number=e), dict(base, episode_number=e)]
+                attempts.append(dict(base, season_number=info["season"] or 1))
+            else:
+                attempts = [base, {k: v for k, v in base.items() if k != "year"}]
+            for q in attempts:
+                try:
+                    res = http_json(self.API + "?" + urllib.parse.urlencode(q))
+                except urllib.error.HTTPError as e:
+                    log(f"  SubDL: HTTP {e.code}")
+                    return out
+                subs = (res.get("subtitles") or []) if res.get("status") else []
+                for s in subs:
+                    if s.get("url") and s["url"] not in seen:
+                        seen.add(s["url"])
+                        out.append(self._cand(s))
+                if any(ep_status(c, info) for c in out) or (out and info["kind"] == "movie"):
+                    return out
+        return out
 
-    def _cand(self, s, info):
-        release = s.get("release_name") or s.get("name") or ""
+    def _cand(self, s):
         url = "https://dl.subdl.com" + s["url"]
-        ep_ok = None
-        if info["episode"] is not None:
-            se, ee = s.get("season"), s.get("episode")
-            if ee == info["episode"]:
-                ep_ok = True
-            elif s.get("full_season") or (s.get("episode_from") and s.get("episode_end")
-                                          and s["episode_from"] <= info["episode"] <= s["episode_end"]):
-                ep_ok = None  # pack - may contain it
-            elif ee is not None:
-                ep_ok = False
-        return {"source": self.name, "release": release, "hash": False, "ep_ok": ep_ok,
-                "author": s.get("author") or "", "fetch": lambda: ("sub.zip", http(url, timeout=60))}
+        return {"source": self.name, "release": s.get("release_name") or s.get("name") or "", "hash": False,
+                "season": s.get("season"), "episode": s.get("episode"), "pack": bool(s.get("full_season")),
+                "range": (s.get("episode_from"), s.get("episode_end")),
+                "fetch": lambda: ("sub.zip", http(url, timeout=60))}
 
 
 class OpenSubtitles:
@@ -228,42 +312,49 @@ class OpenSubtitles:
             if r.get("base_url"):
                 self.base = "https://" + r["base_url"] + "/api/v1"
         except urllib.error.HTTPError as e:
-            log(f"OpenSubtitles login failed (HTTP {e.code}); continuing without login")
+            log(f"  OpenSubtitles login failed (HTTP {e.code}); continuing without login")
 
     def search(self, info, log, path):
         self.login(log)
-        q = {"languages": "ar", "query": info["title"].lower()}
-        mh = opensubtitles_hash(path) if os.path.exists(path) else None
-        if mh:
-            q["moviehash"] = mh
-        if info["kind"] == "tv":
-            q["episode_number"] = info["episode"]
-            q["season_number"] = info["season"] or 1
-            q["type"] = "episode"
-        elif info["year"]:
-            q["year"] = info["year"]
-        url = self.base + "/subtitles?" + urllib.parse.urlencode(sorted(q.items()))
-        try:
-            res = http_json(url, headers=self._h())
-        except urllib.error.HTTPError as e:
-            log(f"OpenSubtitles: HTTP {e.code}")
-            return []
-        out = []
-        for d in res.get("data", []):
-            a = d.get("attributes", {})
-            files = a.get("files") or []
-            if not files:
-                continue
-            fid = files[0]["file_id"]
-            fd = a.get("feature_details") or {}
-            ep_ok = None
-            if info["episode"] is not None and fd.get("episode_number") is not None:
-                ep_ok = fd["episode_number"] == info["episode"]
-            out.append({"source": self.name, "release": a.get("release") or files[0].get("file_name", ""),
-                        "hash": bool(a.get("moviehash_match")), "ep_ok": ep_ok,
-                        "author": (a.get("uploader") or {}).get("name", ""),
-                        "downloads": a.get("download_count", 0),
-                        "fetch": (lambda fid=fid: self._download(fid))})
+        queries = []
+        mh = opensubtitles_hash(path) if os.path.isfile(path) else None
+        if mh:  # the file's fingerprint alone — works even when the file name says nothing
+            queries.append({"languages": "ar", "moviehash": mh})
+        if info["title"] or info.get("imdb"):
+            base = {"languages": "ar"}
+            if info.get("imdb"):
+                base["parent_imdb_id" if info["kind"] == "tv" else "imdb_id"] = int(info["imdb"][2:])
+            else:
+                base["query"] = info["title"].lower()
+            if info["kind"] == "tv":
+                for s, e in info["variants"]:
+                    q = dict(base, episode_number=e, type="episode")
+                    if s is not None:
+                        q["season_number"] = s
+                    queries.append(q)
+            else:
+                queries.append(dict(base, year=info["year"]) if info["year"] else base)
+        seen, out = set(), []
+        for q in queries:
+            url = self.base + "/subtitles?" + urllib.parse.urlencode(sorted(q.items()))
+            try:
+                res = http_json(url, headers=self._h())
+            except urllib.error.HTTPError as e:
+                log(f"  OpenSubtitles: HTTP {e.code}")
+                break
+            for d in res.get("data", []):
+                a = d.get("attributes", {})
+                files = a.get("files") or []
+                if not files or files[0]["file_id"] in seen:
+                    continue
+                fid = files[0]["file_id"]
+                seen.add(fid)
+                fd = a.get("feature_details") or {}
+                out.append({"source": self.name, "release": a.get("release") or files[0].get("file_name", ""),
+                            "hash": bool(a.get("moviehash_match")),
+                            "season": fd.get("season_number"), "episode": fd.get("episode_number"),
+                            "ident": identity(fd), "downloads": a.get("download_count", 0),
+                            "fetch": (lambda fid=fid: self._download(fid))})
         return out
 
     def _download(self, fid):
@@ -271,6 +362,18 @@ class OpenSubtitles:
         if not r.get("link"):
             raise RuntimeError(r.get("message") or "download quota reached")
         return r.get("file_name") or "sub.srt", http(r["link"], timeout=60)
+
+
+def identity(fd):
+    """What OpenSubtitles says a subtitle belongs to, in parse_name() shape."""
+    if (fd.get("feature_type") or "").lower() == "episode":
+        imdb = fd.get("parent_imdb_id")
+        return {"kind": "tv", "title": fd.get("parent_title") or "", "year": None,
+                "season": fd.get("season_number"), "episode": fd.get("episode_number"),
+                "imdb": "tt%07d" % imdb if imdb else None}
+    imdb = fd.get("imdb_id")
+    return {"kind": "movie", "title": fd.get("title") or "", "year": fd.get("year"),
+            "season": None, "episode": None, "imdb": "tt%07d" % imdb if imdb else None}
 
 
 def score(c, info):
@@ -316,13 +419,12 @@ def pick_from_zip(data, info):
         def rank(n):
             se, ep = episode_of(os.path.basename(n))
             r = similarity(info["raw"], os.path.basename(n))
-            if info["episode"] is not None and ep == info["episode"]:
+            if info["episode"] is not None and ep is not None and ep_match(info, se, ep):
                 r += 10
-            if info["season"] is not None and se == info["season"]:
-                r += 1
             return r
         best = max(subs, key=rank)
-        if info["episode"] is not None and episode_of(os.path.basename(best))[1] not in (info["episode"], None):
+        se, ep = episode_of(os.path.basename(best))
+        if info["episode"] is not None and ep is not None and not ep_match(info, se, ep):
             raise RuntimeError("season pack doesn't contain this episode")
     return os.path.basename(best), z.read(best)
 
@@ -350,7 +452,7 @@ class App:
         self.cands = []
         self.current = None  # (video, info)
         root.title(APP + " — Arabic subtitles")
-        root.geometry("720x520")
+        root.geometry("760x560")
         root.minsize(560, 420)
         assets = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets")
         try:
@@ -380,6 +482,16 @@ class App:
         ttk.Button(btns, text="Choose folder…", command=self.pick_folder).pack(side="left", padx=8, ipadx=8, ipady=4)
         self.status = ttk.Label(btns, text="", foreground="#555")
         self.status.pack(side="left", padx=8)
+
+        fix = ttk.Frame(root, padding=(12, 10, 12, 0))
+        fix.pack(fill="x")
+        ttk.Label(fix, text="Search as:").pack(side="left")
+        self.f_title, self.f_season, self.f_episode, self.f_year = (tk.StringVar() for _ in range(4))
+        ttk.Entry(fix, textvariable=self.f_title, width=28).pack(side="left", padx=(6, 10), fill="x", expand=True)
+        for label, var in (("Season", self.f_season), ("Episode", self.f_episode), ("Year", self.f_year)):
+            ttk.Label(fix, text=label).pack(side="left")
+            ttk.Entry(fix, textvariable=var, width=5).pack(side="left", padx=(4, 10))
+        ttk.Button(fix, text="Search", command=self.search_again).pack(side="left")
 
         mid = ttk.Frame(root, padding=12)
         mid.pack(fill="both", expand=True)
@@ -471,20 +583,47 @@ class App:
                 self.log(f"  ✗ error: {e}")
         self.set_status(f"Done — {ok}/{len(videos)} subtitled")
 
-    def process(self, video):
-        info = parse_name(video)
-        what = info["title"] + (f"  S{info['season'] or 1:02d}E{info['episode']:02d}" if info["kind"] == "tv"
-                                else (f" ({info['year']})" if info["year"] else ""))
-        self.log(f"▶ {os.path.basename(video)}\n  detected: {what}")
+    def process(self, video, info=None):
+        info = info or parse_name(video)
+        self.log(f"▶ {os.path.basename(video)}\n  detected: {describe(info) or '(nothing useful in the file name)'}")
+        self.prepare(info)
+        provs = self.providers()
+        osub = [p for p in provs if isinstance(p, OpenSubtitles)]
         cands = []
-        for p in self.providers():
+
+        # OpenSubtitles first: its file-fingerprint match can identify the video when the name can't
+        for p in osub:
             try:
-                found = p.search(info, self.log, video) if isinstance(p, OpenSubtitles) else p.search(info, self.log)
+                found = p.search(info, self.log, video)
+                self.log(f"  {p.name}: {len(found)} Arabic result(s)")
+                cands += found
+            except Exception as e:
+                self.log(f"  {p.name}: {e}")
+        ident = next((c["ident"] for c in cands if c["hash"] and c["ident"]["title"]), None)
+        if ident:
+            info["imdb"] = ident["imdb"]
+            if (similarity(ident["title"], info["title"]) < 0.5 or ident["episode"] != info["episode"]
+                    or (info["season"] and ident["season"] != info["season"])):
+                self.log(f"  identified by file fingerprint: {describe(ident)}")
+                info.update(ident)
+                self.prepare(info)
+
+        if not info["title"] and not info.get("imdb"):
+            self.log("  ✗ couldn't tell what this video is — type the title in 'Search as' below and press Search")
+            self.root.after(0, self.show_cands, [], video, info)
+            return False
+
+        for p in provs:
+            if p in osub:
+                continue
+            try:
+                found = p.search(info, self.log)
                 self.log(f"  {p.name}: {len(found)} Arabic result(s)")
                 cands += found
             except Exception as e:
                 self.log(f"  {p.name}: {e}")
         for c in cands:
+            c["ep_ok"] = ep_status(c, info)
             c["score"] = score(c, info)
         cands.sort(key=lambda c: c["score"], reverse=True)
         self.root.after(0, self.show_cands, cands, video, info)
@@ -497,11 +636,35 @@ class App:
                 return True
             except Exception as e:
                 self.log(f"  {c['source']} download failed: {e}")
-        self.log("  ✗ no Arabic subtitle found")
+        self.log("  ✗ no Arabic subtitle found — check 'Search as' below and press Search to retry")
         return False
+
+    def prepare(self, info):
+        """Work out other numberings of the episode (absolute <-> season/episode)."""
+        info["kind"] = "tv" if info["episode"] is not None else "movie"
+        eps = tvmaze_episodes(info["title"], info["season"], info["episode"]) if info["kind"] == "tv" else []
+        info["variants"] = episode_variants(info["season"], info["episode"], eps)
+        for s, e in info["variants"][1:]:
+            self.log(f"  also searching as {'episode %d' % e if s is None else 'S%02dE%02d' % (s, e)}")
+
+    def search_again(self):
+        if not self.current:
+            messagebox.showinfo(APP, "Choose a video first.")
+            return
+        video, old = self.current
+        num = lambda v: int(v) if v.strip().isdigit() else None
+        info = dict(old, title=self.f_title.get().strip(), season=num(self.f_season.get()),
+                    episode=num(self.f_episode.get()), year=num(self.f_year.get()), imdb=None)
+        if not self.providers():
+            self.settings()
+            return
+        threading.Thread(target=lambda: self.process(video, info), daemon=True).start()
 
     def show_cands(self, cands, video, info):
         self.cands, self.current = cands, (video, info)
+        for var, v in ((self.f_title, info["title"]), (self.f_season, info["season"]),
+                       (self.f_episode, info["episode"]), (self.f_year, info["year"])):
+            var.set("" if v is None else v)
         self.tree.delete(*self.tree.get_children())
         for i, c in enumerate(cands):
             mark = " ★hash" if c["hash"] else ""
