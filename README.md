@@ -1,3 +1,5 @@
+<img src="assets/icon.png" width="96" align="right" alt="ArSubs icon">
+
 # ArSubs
 
 A small Windows app that downloads the right **Arabic subtitle** for a movie, TV episode or anime episode and saves it next to the video.
@@ -36,7 +38,7 @@ Build the exe:
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --name ArSubs arsubs.pyw
+pyinstaller --onefile --windowed --name ArSubs --icon assets/icon.ico --add-data "assets/icon.ico;assets" arsubs.pyw
 ```
 
 ## License

@@ -347,6 +347,11 @@ class App:
         root.title(APP + " — Arabic subtitles")
         root.geometry("720x520")
         root.minsize(560, 420)
+        icon = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets", "icon.ico")
+        try:
+            root.iconbitmap(default=icon)
+        except tk.TclError:
+            pass
         try:
             ttk.Style().theme_use("vista")
         except tk.TclError:
