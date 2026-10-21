@@ -100,4 +100,42 @@ tk_root.after(200, check)
 tk_root.after(15000, tk_root.destroy)  # safety net
 tk_root.mainloop()
 assert (seen.get("title"), seen.get("season"), seen.get("episode")) == ("Dark", 1, 5), seen
+
+# --- no video at all: search by title, results are listed, saved where the user picks
+tk_root = m.tk.Tk()
+app = m.App(tk_root)
+arabic = "1\n00:00:01,000 --> 00:00:02,000\nمرحبا\n".encode("cp1256")  # old Windows Arabic encoding
+movie_sub = {"source": "SubDL", "release": "Inception.2010.1080p.BluRay", "hash": False,
+             "season": None, "episode": None, "fetch": lambda: ("x.srt", arabic)}
+
+
+class FakeSubDL2(m.SubDL):
+    def search(self, info, log):
+        seen.update(info)
+        return [movie_sub]
+
+
+app.providers = lambda: [FakeSubDL2("k")]
+seen.clear()
+app.f_title.set("Inception")
+app.f_year.set("2010")
+
+
+def check2():
+    if app.tree.get_children():
+        tk_root.after(200, tk_root.destroy)
+    else:
+        tk_root.after(100, check2)
+
+
+tk_root.after(100, app.search_again)
+tk_root.after(200, check2)
+tk_root.after(15000, tk_root.destroy)  # safety net
+tk_root.mainloop()
+assert (seen.get("title"), seen.get("year"), seen.get("kind")) == ("Inception", 2010, "movie"), seen
+video, info = app.current
+assert video is None and len(app.cands) == 1
+out = m.save_subtitle(os.path.join(tmp, "Inception (2010).ar"), app.cands[0], info)
+assert out.endswith("Inception (2010).ar.srt"), out
+assert "مرحبا" in open(out, encoding="utf-8-sig").read()
 print(f"OK on {sys.platform}")

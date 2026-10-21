@@ -26,9 +26,11 @@ Get the latest version from the [Releases](../../releases) page:
 2. Click **Choose video file(s)…**, or **Choose folder…** to do a whole season.
 3. The subtitle is saved as `VideoName.ar.srt` next to the video. VLC, MPV and MPC load it automatically.
 
+**No video file?** Type a title in the **Search** row (add season and episode for a show, or the year for a movie) and press Enter. Double-click a result and choose where to save it. Press **Clear** to start a new search.
+
 If the subtitle it picked is out of sync, double-click another match in the list to replace it.
 
-If it can't find anything, or detected the wrong show, fix the title, season or episode in the **Search as** row and press **Search**.
+If it can't find anything, or detected the wrong show, fix the title, season or episode in the **Search** row and press **Search**.
 
 ## Features
 

@@ -317,7 +317,7 @@ class OpenSubtitles:
     def search(self, info, log, path):
         self.login(log)
         queries = []
-        mh = opensubtitles_hash(path) if os.path.isfile(path) else None
+        mh = opensubtitles_hash(path) if path and os.path.isfile(path) else None
         if mh:  # the file's fingerprint alone — works even when the file name says nothing
             queries.append({"languages": "ar", "moviehash": mh})
         if info["title"] or info.get("imdb"):
@@ -429,7 +429,8 @@ def pick_from_zip(data, info):
     return os.path.basename(best), z.read(best)
 
 
-def save_subtitle(video, cand, info):
+def save_subtitle(dest, cand, info):
+    """Download cand and write it as dest + real extension (e.g. "Movie.ar" -> "Movie.ar.srt")."""
     fname, data = cand["fetch"]()
     if data[:2] == b"PK":
         fname, data = pick_from_zip(data, info)
@@ -437,7 +438,7 @@ def save_subtitle(video, cand, info):
     if ext not in SUB_EXT:
         ext = ".srt"
     text = decode_sub(data).replace("\r\n", "\n")
-    out = os.path.splitext(video)[0] + ".ar" + ext
+    out = dest + ext
     with open(out, "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write(text)
     return out
@@ -452,8 +453,8 @@ class App:
         self.cands = []
         self.current = None  # (video, info)
         root.title(APP + " — Arabic subtitles")
-        root.geometry("760x560")
-        root.minsize(560, 420)
+        root.geometry("860x560")
+        root.minsize(760, 420)
         assets = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets")
         try:
             if WINDOWS:
@@ -485,17 +486,22 @@ class App:
 
         fix = ttk.Frame(root, padding=(12, 10, 12, 0))
         fix.pack(fill="x")
-        ttk.Label(fix, text="Search as:").pack(side="left")
+        self.search_label = ttk.Label(fix, text="Search:", width=10)
+        self.search_label.pack(side="left")
         self.f_title, self.f_season, self.f_episode, self.f_year = (tk.StringVar() for _ in range(4))
         ttk.Entry(fix, textvariable=self.f_title, width=28).pack(side="left", padx=(6, 10), fill="x", expand=True)
         for label, var in (("Season", self.f_season), ("Episode", self.f_episode), ("Year", self.f_year)):
             ttk.Label(fix, text=label).pack(side="left")
             ttk.Entry(fix, textvariable=var, width=5).pack(side="left", padx=(4, 10))
         ttk.Button(fix, text="Search", command=self.search_again).pack(side="left")
+        ttk.Button(fix, text="Clear", width=6, command=self.clear_video).pack(side="left", padx=(6, 0))
+        for w in fix.winfo_children():
+            if isinstance(w, ttk.Entry):
+                w.bind("<Return>", lambda _e: self.search_again())
 
         mid = ttk.Frame(root, padding=12)
         mid.pack(fill="both", expand=True)
-        ttk.Label(mid, text="Matches for the last file (double-click to use a different one):").pack(anchor="w")
+        ttk.Label(mid, text="Results (double-click one to save it):").pack(anchor="w")
         cols = ("score", "source", "release")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=7)
         for c, w in zip(cols, (60, 110, 500)):
@@ -507,6 +513,7 @@ class App:
         self.log_box = tk.Text(mid, height=8, wrap="word", font=(MONO_FONT, 9), relief="flat",
                                background="#f6f6f6", state="disabled")
         self.log_box.pack(fill="both")
+        self.log("No video? Type a title in Search (plus season/episode, or year for a movie) and press Enter.")
 
         if not (self.cfg.get("subdl_key") or self.cfg.get("os_key")):
             root.after(300, lambda: (messagebox.showinfo(APP, "Add at least one free API key (SubDL and/or "
@@ -585,7 +592,10 @@ class App:
 
     def process(self, video, info=None):
         info = info or parse_name(video)
-        self.log(f"▶ {os.path.basename(video)}\n  detected: {describe(info) or '(nothing useful in the file name)'}")
+        if video:
+            self.log(f"▶ {os.path.basename(video)}\n  detected: {describe(info) or '(nothing useful in the file name)'}")
+        else:
+            self.log(f"▶ search: {describe(info)}")
         self.prepare(info)
         provs = self.providers()
         osub = [p for p in provs if isinstance(p, OpenSubtitles)]
@@ -627,11 +637,15 @@ class App:
             c["score"] = score(c, info)
         cands.sort(key=lambda c: c["score"], reverse=True)
         self.root.after(0, self.show_cands, cands, video, info)
+        if not video:  # nothing to put it next to — let the user pick one and where to save it
+            self.log(f"  {len(cands)} result(s) — double-click one to save it" if cands
+                     else "  ✗ no Arabic subtitle found")
+            return bool(cands)
         for c in cands[:4]:  # fall through if a download fails (quota, bad pack, …)
             if c["ep_ok"] is False:
                 break
             try:
-                out = save_subtitle(video, c, info)
+                out = save_subtitle(os.path.splitext(video)[0] + ".ar", c, info)
                 self.log(f"  ✓ saved {os.path.basename(out)}  ← {c['source']}: {c['release']}")
                 return True
             except Exception as e:
@@ -648,20 +662,30 @@ class App:
             self.log(f"  also searching as {'episode %d' % e if s is None else 'S%02dE%02d' % (s, e)}")
 
     def search_again(self):
-        if not self.current:
-            messagebox.showinfo(APP, "Choose a video first.")
-            return
-        video, old = self.current
+        video, old = self.current or (None, {})
         num = lambda v: int(v) if v.strip().isdigit() else None
         info = dict(old, title=self.f_title.get().strip(), season=num(self.f_season.get()),
                     episode=num(self.f_episode.get()), year=num(self.f_year.get()), imdb=None)
+        if not info["title"]:
+            messagebox.showinfo(APP, "Type a title to search for, or choose a video file.")
+            return
+        if not video:  # what release names are compared against when ranking
+            info["raw"] = describe(info).replace("  ", " ")
         if not self.providers():
             self.settings()
             return
         threading.Thread(target=lambda: self.process(video, info), daemon=True).start()
 
+    def clear_video(self):
+        self.current = None
+        for var in (self.f_title, self.f_season, self.f_episode, self.f_year):
+            var.set("")
+        self.search_label.configure(text="Search:")
+        self.tree.delete(*self.tree.get_children())
+
     def show_cands(self, cands, video, info):
         self.cands, self.current = cands, (video, info)
+        self.search_label.configure(text="Search as:" if video else "Search:")
         for var, v in ((self.f_title, info["title"]), (self.f_season, info["season"]),
                        (self.f_episode, info["episode"]), (self.f_year, info["year"])):
             var.set("" if v is None else v)
@@ -676,11 +700,25 @@ class App:
             return
         c = self.cands[int(sel[0])]
         video, info = self.current
+        if video:
+            dest, verb = os.path.splitext(video)[0] + ".ar", "replaced with"
+        else:
+            name = re.sub(r'[\\/:*?"<>|]+', "", describe(info)).replace("  ", " ").strip() or "subtitle"
+            path = filedialog.asksaveasfilename(
+                title="Save subtitle", initialfile=name + ".ar.srt",
+                initialdir=self.cfg.get("save_dir") or os.path.expanduser("~"),
+                filetypes=[("Subtitles", "*.srt *.ass *.ssa *.vtt *.sub"), ("All", "*")])
+            if not path:
+                return
+            self.cfg["save_dir"] = os.path.dirname(path)
+            save_config(self.cfg)
+            base, ext = os.path.splitext(path)
+            dest, verb = (base if ext.lower() in SUB_EXT else path), "saved"
 
         def go():
             try:
-                out = save_subtitle(video, c, info)
-                self.log(f"  ✓ replaced with {os.path.basename(out)}  ← {c['release']}")
+                out = save_subtitle(dest, c, info)
+                self.log(f"  ✓ {verb} {os.path.basename(out) if video else out}  ← {c['release']}")
             except Exception as e:
                 self.log(f"  ✗ {e}")
         threading.Thread(target=go, daemon=True).start()
