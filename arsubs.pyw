@@ -21,7 +21,12 @@ APP = "ArSubs"
 UA = "ArSubs v1.0"
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm", ".flv", ".mpg", ".mpeg"}
 SUB_EXT = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
-CONFIG_PATH = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP, "config.json")
+WINDOWS = sys.platform == "win32"
+CONFIG_DIR = ((os.environ.get("APPDATA") if WINDOWS else os.environ.get("XDG_CONFIG_HOME"))
+              or os.path.join(os.path.expanduser("~"), ".config"))
+CONFIG_PATH = os.path.join(CONFIG_DIR, APP, "config.json")
+UI_FONT = "Segoe UI" if WINDOWS else "TkDefaultFont"
+MONO_FONT = "Consolas" if WINDOWS else "TkFixedFont"
 
 
 # ---------------------------------------------------------------- config
@@ -347,19 +352,26 @@ class App:
         root.title(APP + " — Arabic subtitles")
         root.geometry("720x520")
         root.minsize(560, 420)
-        icon = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets", "icon.ico")
+        assets = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets")
         try:
-            root.iconbitmap(default=icon)
+            if WINDOWS:
+                root.iconbitmap(default=os.path.join(assets, "icon.ico"))
+            else:
+                self._icon = tk.PhotoImage(file=os.path.join(assets, "icon-64.png"))
+                root.iconphoto(True, self._icon)
         except tk.TclError:
             pass
-        try:
-            ttk.Style().theme_use("vista")
-        except tk.TclError:
-            pass
+        style = ttk.Style()
+        for theme in ("vista", "clam") if WINDOWS else ("clam",):
+            try:
+                style.theme_use(theme)
+                break
+            except tk.TclError:
+                pass
 
         top = ttk.Frame(root, padding=12)
         top.pack(fill="x")
-        ttk.Label(top, text="Arabic subtitle downloader", font=("Segoe UI Semibold", 14)).pack(side="left")
+        ttk.Label(top, text="Arabic subtitle downloader", font=(UI_FONT, 14, "bold")).pack(side="left")
         ttk.Button(top, text="Settings", command=self.settings).pack(side="right")
 
         btns = ttk.Frame(root, padding=(12, 0))
@@ -380,7 +392,7 @@ class App:
         self.tree.pack(fill="both", expand=True, pady=(4, 8))
         self.tree.bind("<Double-1>", self.use_selected)
 
-        self.log_box = tk.Text(mid, height=8, wrap="word", font=("Consolas", 9), relief="flat",
+        self.log_box = tk.Text(mid, height=8, wrap="word", font=(MONO_FONT, 9), relief="flat",
                                background="#f6f6f6", state="disabled")
         self.log_box.pack(fill="both")
 
@@ -427,7 +439,8 @@ class App:
     # -- actions
     def pick_files(self):
         fs = filedialog.askopenfilenames(title="Choose video files",
-                                         filetypes=[("Video", " ".join("*" + e for e in VIDEO_EXT)), ("All", "*.*")])
+                                         filetypes=[("Video", " ".join("*" + x for e in sorted(VIDEO_EXT) for x in (e, e.upper()))),
+                                                    ("All", "*")])
         if fs:
             self.run(list(fs))
 
@@ -526,7 +539,7 @@ class App:
             vars_[k] = tk.StringVar(value=self.cfg.get(k, ""))
             ttk.Entry(f, textvariable=vars_[k], width=46, show="•" if k == "os_pass" else "").grid(
                 row=r * 2, column=1, padx=8, pady=(6, 0))
-            ttk.Label(f, text=hint, foreground="#888", font=("Segoe UI", 8)).grid(row=r * 2 + 1, column=1, sticky="w", padx=8)
+            ttk.Label(f, text=hint, foreground="#888", font=(UI_FONT, 8)).grid(row=r * 2 + 1, column=1, sticky="w", padx=8)
 
         def ok():
             for k, v in vars_.items():
@@ -542,7 +555,7 @@ class App:
 def main():
     try:
         import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # crisp text on HiDPI screens
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # crisp text on HiDPI Windows screens
     except Exception:
         pass
     root = tk.Tk()

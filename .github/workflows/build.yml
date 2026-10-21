@@ -1,0 +1,68 @@
+name: Test & build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Tk and a virtual display (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python tests/smoke_test.py
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: python tests/smoke_test.py
+
+      - name: Build
+        run: |
+          pip install pyinstaller
+          pyinstaller --noconfirm --onefile --windowed --name ArSubs --icon assets/icon.ico --add-data "assets:assets" arsubs.pyw
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir ArSubs-linux
+          cp dist/ArSubs linux/install.sh linux/icon.png ArSubs-linux/
+          chmod +x ArSubs-linux/install.sh ArSubs-linux/ArSubs
+          tar czf ArSubs-linux-x86_64.tar.gz ArSubs-linux
+          echo "ASSET=ArSubs-linux-x86_64.tar.gz" >> "$GITHUB_ENV"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp dist/ArSubs.exe ArSubs.exe
+          echo "ASSET=ArSubs.exe" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArSubs-${{ runner.os }}
+          path: ${{ env.ASSET }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "ArSubs $GITHUB_REF_NAME" --notes "Windows: download ArSubs.exe. Linux: download the .tar.gz, extract it, and run ./install.sh" || true
+          gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
